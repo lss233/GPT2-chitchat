@@ -24,6 +24,8 @@ import pandas as pd
 import torch.nn.utils.rnn as rnn_utils
 import numpy as np
 from dataset import MyDataset
+import wandb
+run = wandb.init(project="GPT2-chitchat")
 
 
 def set_args():
@@ -141,6 +143,7 @@ def load_dataset(logger, args):
 
 def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
                 epoch, args):
+    wandb.watch(model, log_freq=100) # Magic 
     model.train()
     device = args.device
     # pad_id = args.pad_id
@@ -189,6 +192,7 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
                 optimizer.zero_grad()
 
             if (batch_idx + 1) % args.log_step == 0:
+                wandb.log({"batch": batch_idx + 1, "epoch": epoch + 1, "loss": loss.item() * args.gradient_accumulation_steps, "batch_acc": batch_acc, "lr": scheduler.get_lr()})
                 logger.info(
                     "batch {} of epoch {}, loss {}, batch_acc {}, lr {}".format(
                         batch_idx + 1, epoch + 1, loss.item() * args.gradient_accumulation_steps, batch_acc, scheduler.get_lr()))
@@ -207,12 +211,13 @@ def train_epoch(model, train_dataloader, optimizer, scheduler, logger,
     # 记录当前epoch的平均loss与accuracy
     epoch_mean_loss = total_loss / len(train_dataloader)
     epoch_mean_acc = epoch_correct_num / epoch_total_num
+    wandb.log({"epoch": epoch + 1, "loss": epoch_mean_loss, "predict_acc": epoch_mean_acc})
     logger.info(
         "epoch {}: loss {}, predict_acc {}".format(epoch + 1, epoch_mean_loss, epoch_mean_acc))
 
     # save model
     logger.info('saving model for epoch {}'.format(epoch + 1))
-    model_path = join(args.save_model_path, 'epoch{}'.format(epoch + 1))
+    model_path = join(args.save_model_path, 'last'.format(epoch + 1))
     if not os.path.exists(model_path):
         os.mkdir(model_path)
     model_to_save = model.module if hasattr(model, 'module') else model
@@ -303,12 +308,16 @@ def train(model, logger, train_dataset, validate_dataset, args):
         # 保存当前困惑度最低的模型，困惑度低，模型的生成效果不一定会越好
         if validate_loss < best_val_loss:
             best_val_loss = validate_loss
+            wandb.run.summary["best_val_loss"] = best_val_loss
             logger.info('saving current best model for epoch {}'.format(epoch + 1))
             model_path = join(args.save_model_path, 'min_ppl_model'.format(epoch + 1))
             if not os.path.exists(model_path):
                 os.mkdir(model_path)
             model_to_save = model.module if hasattr(model, 'module') else model
             model_to_save.save_pretrained(model_path)
+            artifact = wandb.Artifact('min_ppl_model', type='model')
+            artifact.add_dir(model_path)
+            run.log_artifact(artifact)
 
         #  如果patience=0,则不进行early stopping
         if args.patience == 0:
@@ -320,6 +329,11 @@ def train(model, logger, train_dataset, validate_dataset, args):
     logger.info('training finished')
     logger.info("train_losses:{}".format(train_losses))
     logger.info("validate_losses:{}".format(validate_losses))
+    wandb.log({"train_losses": train_losses, "validate_losses": validate_losses})
+    model_path = join(args.save_model_path, 'last'.format(epoch + 1))
+    artifact = wandb.Artifact('last', type='model')
+    artifact.add_dir(model_path)
+    run.log_artifact(artifact)
 
 
 def caculate_loss(logit, target, pad_idx, smoothing=True):
